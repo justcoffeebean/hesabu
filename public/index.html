@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Hesabu</title>
+<script src="/theme.js"></script>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231F6B4D'/><text x='16' y='23' font-size='20' font-family='monospace' fill='white' text-anchor='middle'>h</text></svg>">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<div id="gate" class="gate" hidden></div>
+
+<div id="shell" class="shell" hidden>
+  <aside class="rail">
+    <div class="mark">
+      <span class="mark-glyph" aria-hidden="true">h</span>
+      <span class="mark-name">Hesabu<em id="companyName"></em></span>
+    </div>
+
+    <nav id="nav" aria-label="Main"></nav>
+
+    <div class="rail-foot">
+      <button type="button" class="account" id="accountButton" data-act="account">
+        <span class="account-name" id="accountName"></span>
+        <span class="account-role" id="accountRole"></span>
+      </button>
+      <label class="appearance">
+        <span>Appearance</span>
+        <select id="themeSelect">
+          <option value="system">Auto</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+    </div>
+  </aside>
+
+  <main id="main" tabindex="-1"></main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<dialog id="sheet" aria-labelledby="sheetTitle">
+  <form id="sheetForm" novalidate>
+    <header>
+      <h2 id="sheetTitle">Untitled</h2>
+      <button type="button" class="icon" id="sheetClose" aria-label="Close">&times;</button>
+    </header>
+    <div id="sheetBody"></div>
+    <footer>
+      <p class="sheet-error" id="sheetError" role="alert"></p>
+      <button type="button" class="ghost" id="sheetCancel">Cancel</button>
+      <button type="submit" class="solid" id="sheetSave">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
