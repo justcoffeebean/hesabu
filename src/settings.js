@@ -21,7 +21,14 @@ const REMINDERS = {
   offsets: [-3, 0, 7, 14, 30]
 };
 
+const SECURITY = {
+  // When on, owner and accounts users must set up two-step sign-in before they can use the app.
+  requireTwoStep: false
+};
+
 const company = (conn = db.knex) => db.getSetting(conn, 'company', COMPANY);
 const reminders = (conn = db.knex) => db.getSetting(conn, 'reminders', REMINDERS);
 
-module.exports = { COMPANY, REMINDERS, company, reminders };
+const security = (conn = db.knex) => db.getSetting(conn, 'security', SECURITY);
+
+module.exports = { COMPANY, REMINDERS, SECURITY, company, reminders, security };

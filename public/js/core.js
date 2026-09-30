@@ -21,6 +21,9 @@ export class ApiError extends Error {
 
 let onSignedOut = () => {};
 export const whenSignedOut = (fn) => { onSignedOut = fn; };
+let onMustEnrol = () => {};
+/** The business started requiring two-step sign-in while this person was signed in without it. */
+export const whenMustEnrol = (fn) => { onMustEnrol = fn; };
 
 export async function api(path, method = 'GET', body) {
   const res = await fetch('/api' + path, {
@@ -32,6 +35,7 @@ export async function api(path, method = 'GET', body) {
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({ error: 'The server sent something unreadable.' }));
   if (res.status === 401 && !path.startsWith('/auth/')) onSignedOut();
+  if (res.status === 403 && data.enrolTwoStep) onMustEnrol();
   if (!res.ok) throw new ApiError(res.status, data);
   return data;
 }

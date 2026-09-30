@@ -84,14 +84,6 @@ test('one address guessing across many accounts is stopped too', async () => {
   assert.equal(other.status, 401);
 });
 
-test('flooding the limiter with junk keys does not reset the count for the target', () => {
-  // The old limiter cleared everything past 5000 keys, so a spray of junk emails unlocked the target.
-  const l = require('../src/auth').limiter(3);
-  for (let i = 0; i < 3; i++) l.fail('target');
-  for (let i = 0; i < 9000; i++) l.fail(`junk-${i}`);
-  assert.equal(l.blocked('target'), true);
-});
-
 test('invite link → set password → signed in; link works once', async () => {
   const owner = h.client(app.base);
   await owner.post('/api/auth/login', { email: 'owner@test.co.ke', password: 'owner-password-1' });
@@ -101,7 +93,7 @@ test('invite link → set password → signed in; link works once', async () => 
 
   const token = invite.data.link.split('/#/link/')[1];
   const c = h.client(app.base);
-  assert.deepEqual((await c.get(`/api/auth/link/${token}`)).data, { purpose: 'invite', email: 'wanjiru@test.co.ke', name: 'Wanjiru' });
+  assert.deepEqual((await c.get(`/api/auth/link/${token}`)).data, { purpose: 'invite', email: 'wanjiru@test.co.ke', name: 'Wanjiru', twoStep: false });
   const set = await c.post(`/api/auth/link/${token}`, { password: 'wanjiru-password-1' });
   assert.equal(set.status, 200);
   assert.equal((await c.get('/api/auth/me')).data.role, 'accounts');

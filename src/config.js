@@ -72,6 +72,20 @@ const config = {
   }
 };
 
+/** Settings that would make the app unsafe to run. server.js refuses to start while any are listed. */
+config.problems = () => {
+  const out = [];
+  if (config.publicUrl) {
+    let url = null;
+    try { url = new URL(config.publicUrl); } catch { /* reported below */ }
+    if (!url || !/^https?:$/.test(url.protocol)) out.push(`PUBLIC_URL must be a full http(s) address, like https://hesabu.example.com (got "${config.publicUrl}").`);
+    else if (url.pathname !== '/' || url.search || url.hash) out.push('PUBLIC_URL must be just the address, with no path, like https://hesabu.example.com.');
+  } else if (config.production) {
+    out.push('Set PUBLIC_URL in .env (the https address people reach the app on). Sign-in links and M-Pesa callbacks need it.');
+  }
+  return out;
+};
+
 config.daraja.ready = Boolean(
   config.daraja.consumerKey && config.daraja.consumerSecret && config.daraja.passkey &&
   config.daraja.shortcode && config.daraja.callbackSecret && config.publicUrl

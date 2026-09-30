@@ -39,7 +39,7 @@ Press **F5** to run under the debugger. `npm run dev` restarts the server whenev
 | Reminders | Automatic email/SMS reminders before and after the due date, and a log of everything sent |
 | Import | CSV import of clients, items with opening stock, and opening balances |
 | Audit log | Who changed what and when, field by field. Append-only |
-| Team | Invite people, set their role, switch accounts off, send password reset links |
+| Team | Invite people, set their role, switch accounts off, send password reset links, require two-step sign-in, reset two-step for a lost phone |
 | Settings | Company details, payment instructions, currencies and rates, M-Pesa/email/SMS status |
 
 Rules the app enforces: quotations lock once invoiced; payments can't exceed the balance, even when two arrive at the same moment; payments are reversed with a reason, never deleted; clients with documents can't be removed; money is held in integer cents.
@@ -95,11 +95,13 @@ Moving existing SQLite data to PostgreSQL isn't automated. For a small business 
 
 ## Putting it online
 
-- Run it behind a reverse proxy that terminates HTTPS (Caddy, nginx), set `PUBLIC_URL=https://…` and `TRUST_PROXY=1`.
+- Run it behind a reverse proxy that terminates HTTPS (Caddy, nginx), set `NODE_ENV=production`, `PUBLIC_URL=https://…` and `TRUST_PROXY=1`. With `NODE_ENV=production` the app refuses to start without a valid `PUBLIC_URL`, because sign-in links and M-Pesa callbacks are built from it. Without `PUBLIC_URL` (fine on one computer), invite links use the address in the owner's browser, never a `Host` header a stranger could set.
 - Back up the database: copy `data/hesabu.sqlite` while the app is stopped, or use `pg_dump` for PostgreSQL.
 - Recurring invoices and reminders run inside the app each morning after `JOBS_HOUR`. Keep the process running (systemd, pm2, Docker). If it was off, it catches up on start.
 - The security basics are built in: hashed passwords (scrypt), sessions stored hashed, HttpOnly/SameSite cookies, same-origin checks on every change (Origin, or Sec-Fetch-Site when a browser leaves Origin out), a strict Content-Security-Policy, HSTS when `PUBLIC_URL` is https, and an audit log of sign-ins and changes.
-- Guessing is rate limited: sign-in per account and per IP address, the first-run setup code, and the current-password check. Limits reset when the app restarts. Behind a proxy, set `TRUST_PROXY` so they count real visitors rather than the proxy.
+- Guessing is rate limited, and the counts are kept in the database, so a restart doesn't reset them and several servers share them: sign-in per account per IP address (8 per 15 minutes), per IP address across all accounts (30), the first-run setup code (10), and password or two-step checks while signed in (8). Behind a proxy, set `TRUST_PROXY` so they count real visitors rather than the proxy.
+- An account under attack from many addresses (20 wrong tries in 15 minutes) pauses sign-in **from new devices only**. Browsers that have signed in to that account before carry a `hesabu_device` cookie and keep working, so an attacker can't lock the real person out.
+- **Two-step sign-in:** anyone can turn it on under their name (bottom left) with any authenticator app (Google Authenticator, Microsoft Authenticator, Authy, 1Password…). They get ten one-time recovery codes for a lost phone; if those are gone too, an owner can reset it under Team. A reset link changes the password but still asks for the code. Under **Team → Sign-in rules** the owner can require it for owners and accounts; anyone in those roles without it is asked to set it up before they can do anything else.
 - Sessions slide forward while used (`SESSION_DAYS`, default 7) but always end `SESSION_MAX_DAYS` (default 30) after sign-in.
 
 ## Files
@@ -108,7 +110,8 @@ Moving existing SQLite data to PostgreSQL isn't automated. For a small business 
 server.js                 starts the app, runs migrations and the daily jobs
 src/app.js                Express app: security headers, /api, /hooks, static files
 src/config.js             every setting, read from .env
-src/auth.js               passwords, sessions, CSRF, route guards
+src/auth.js               passwords, sessions, CSRF, route guards, rate limits, known devices
+src/totp.js               two-step sign-in codes (RFC 6238) and recovery codes
 src/permissions.js        roles → what they can do
 src/db/                   Knex setup, schema migration, one-time JSON import
 src/routes/               REST endpoints, one file per area

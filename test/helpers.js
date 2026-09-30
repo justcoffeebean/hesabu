@@ -104,19 +104,22 @@ async function start() {
   };
 }
 
-/** A browser-ish client with its own cookie. */
+/** A browser-ish client with its own cookie jar. */
 function client(base) {
-  let cookie = '';
+  const jar = new Map();
+  const header = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
   const call = async (method, url, body, headers = {}) => {
     const res = await fetch(base + url, {
       method,
-      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers },
+      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(jar.size ? { Cookie: header() } : {}), ...headers },
       body: body !== undefined ? JSON.stringify(body) : undefined
     });
     const set = res.headers.getSetCookie?.() || [];
     for (const c of set) {
       const [pair] = c.split(';');
-      cookie = pair.endsWith('=') ? '' : pair;
+      const i = pair.indexOf('=');
+      const [name, value] = [pair.slice(0, i), pair.slice(i + 1)];
+      if (value) jar.set(name, value); else jar.delete(name);
     }
     const type = res.headers.get('content-type') || '';
     const data = type.includes('json') ? await res.json() : type.includes('pdf') || type.includes('csv') ? Buffer.from(await res.arrayBuffer()) : await res.text();
@@ -127,7 +130,9 @@ function client(base) {
     post: (url, body = {}, headers) => call('POST', url, body, headers),
     put: (url, body = {}, headers) => call('PUT', url, body, headers),
     del: (url, headers) => call('DELETE', url, undefined, headers),
-    get cookie() { return cookie; }
+    /** The session cookie as "name=value", or '' when signed out. */
+    get cookie() { return jar.has('hesabu_session') ? `hesabu_session=${jar.get('hesabu_session')}` : ''; },
+    jar
   };
 }
 
