@@ -146,6 +146,11 @@ router.get('/settings/integrations', allow('settings:write'), async (_req, res) 
   res.json({ mpesa: daraja.status(), channels: messages.channelStatus(), jobs: await scheduler.lastRuns(10) });
 });
 
+/** Checks the M-Pesa settings and keys against Safaricom without moving any money. */
+router.post('/settings/mpesa/test', allow('settings:write'), async (_req, res) => {
+  res.json(await daraja.testConnection());
+});
+
 router.post('/settings/mpesa/register-urls', allow('settings:write'), async (req, res) => {
   const result = await daraja.registerC2bUrls();
   await audit(db.knex, req, { action: 'register', entity: 'settings', summary: 'Registered M-Pesa paybill confirmation URLs with Safaricom' });

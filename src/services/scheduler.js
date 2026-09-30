@@ -55,6 +55,7 @@ async function tick() {
   await db.knex('mpesa_requests').where({ status: 'pending' }).where('created_at', '<', cutoff)
     .update({ status: 'failed', result_desc: 'No answer from M-Pesa. Use "Check status" or ask again.', updated_at: db.now() });
   await require('../auth').prune();
+  await require('./mpesa').expireCommands();
 }
 
 let timers = [];

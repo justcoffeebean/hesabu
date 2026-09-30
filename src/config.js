@@ -68,6 +68,13 @@ const config = {
     type: env.DARAJA_TYPE === 'till' ? 'till' : 'paybill',
     callbackSecret: env.MPESA_CALLBACK_SECRET || '',
     allowedIps: (env.DARAJA_ALLOWED_IPS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    // Looking up a receipt and refunding one are done as an "initiator" (an API operator
+    // user created on the M-Pesa org portal). Give either the security credential the
+    // Daraja portal generates, or the initiator's password plus Safaricom's certificate.
+    initiatorName: env.DARAJA_INITIATOR_NAME || '',
+    securityCredential: env.DARAJA_SECURITY_CREDENTIAL || '',
+    initiatorPassword: env.DARAJA_INITIATOR_PASSWORD || '',
+    certFile: env.DARAJA_CERT_FILE || '',
     baseUrl: env.DARAJA_BASE_URL || ''
   }
 };
@@ -89,6 +96,12 @@ config.problems = () => {
 config.daraja.ready = Boolean(
   config.daraja.consumerKey && config.daraja.consumerSecret && config.daraja.passkey &&
   config.daraja.shortcode && config.daraja.callbackSecret && config.publicUrl
+);
+
+// Lookups and refunds need the basics plus an initiator.
+config.daraja.commandsReady = Boolean(
+  config.daraja.ready && config.daraja.initiatorName &&
+  (config.daraja.securityCredential || (config.daraja.initiatorPassword && config.daraja.certFile))
 );
 
 module.exports = config;

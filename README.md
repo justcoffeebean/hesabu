@@ -51,7 +51,7 @@ Rules the app enforces: quotations lock once invoiced; payments can't exceed the
 | Jobs board, quotations, stock counts, ask a customer to pay by M-Pesa | ✓ | ✓ | ✓ |
 | See invoices and clients | ✓ | ✓ | ✓ |
 | Clients, items, invoices, payments, recurring, send documents, imports, audit log | ✓ | ✓ | |
-| Team, company settings, reminder schedule, M-Pesa registration | ✓ | | |
+| Team, company settings, reminder schedule, M-Pesa registration, M-Pesa refunds | ✓ | | |
 
 The full list is in `src/permissions.js`. Change a role there and both the API and the screens follow.
 
@@ -69,23 +69,76 @@ Reminders are **off** until the owner turns them on under Reminders, so upgradin
 
 ### M-Pesa (Daraja)
 
-1. Create an app on the [Daraja portal](https://developer.safaricom.co.ke) and copy the consumer key and secret.
-2. In `.env` set `DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`, `DARAJA_PASSKEY`, `DARAJA_SHORTCODE`, a random `MPESA_CALLBACK_SECRET`, and `PUBLIC_URL`. `PUBLIC_URL` must be an https address Safaricom can reach; locally, use a tunnel such as `cloudflared tunnel --url http://localhost:3000`.
-3. Restart. **Request M-Pesa** now appears on shilling invoices: the customer gets a PIN prompt, and the payment records itself when they pay.
-4. So that customers who pay the paybill **on their own** are recorded too, click **Settings → Register paybill URLs** once. Payments are matched by the account number the customer types:
-   - an invoice number (`INV-2026-0007`, `inv20260007`) pays that invoice;
-   - a client's account code (`ACME`) pays that client's oldest invoices first;
-   - anything else, or anything left over, waits under **Payments → M-Pesa money waiting to be placed**.
+What you get once it's connected:
 
-Go-live: switch `DARAJA_ENV=production` with your production keys after Safaricom approves the app.
+- **Request M-Pesa** on a shilling invoice sends a PIN prompt to the customer's phone; the payment records itself.
+- Payments customers make to your paybill or till **on their own** are recorded and matched automatically.
+- **Look up M-Pesa code** (Payments): a customer shows you the SMS for a payment that never arrived; Hesabu asks Safaricom and records it. *(Needs an initiator, step 5.)*
+- **Refund** (owner only): sends a whole M-Pesa payment back to the customer and reverses it in the books once Safaricom confirms. The owner confirms their password (and two-step code) first. *(Needs an initiator, step 5.)*
 
-Simulate a paybill payment locally:
+#### 1. Sandbox first
+
+1. Sign up at the [Daraja portal](https://developer.safaricom.co.ke), create an app with the M-Pesa sandbox products, and copy its **consumer key** and **consumer secret**.
+2. From the portal's test credentials, note the **Lipa na M-Pesa Online** shortcode (`174379`) and its **passkey**.
+3. Give Safaricom an https address that reaches your computer. Locally, run a tunnel such as `cloudflared tunnel --url http://localhost:3000` and use the https URL it prints. Daraja refuses callback addresses containing `mpesa`, `safaricom`, `sql`, `exe`, `cmd` or `query`, so pick a domain without them.
+4. In `.env`:
+
+   ```bash
+   PUBLIC_URL=https://your-tunnel-or-domain.example.com
+   DARAJA_ENV=sandbox
+   DARAJA_CONSUMER_KEY=...
+   DARAJA_CONSUMER_SECRET=...
+   DARAJA_PASSKEY=...
+   DARAJA_SHORTCODE=174379
+   DARAJA_TYPE=paybill
+   # A long random string. It becomes part of the callback URLs, so anyone who knows it can post fake payments.
+   MPESA_CALLBACK_SECRET=   # node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+   ```
+
+5. *Optional, for lookups and refunds:* the portal's test credentials also list an **initiator name** and a way to generate a **security credential** (the initiator's password encrypted with Safaricom's certificate). Add:
+
+   ```bash
+   DARAJA_INITIATOR_NAME=testapi
+   DARAJA_SECURITY_CREDENTIAL=...   # from the portal's generator
+   # …or let Hesabu encrypt it: the initiator's password plus Safaricom's public certificate (.cer) from the Daraja docs.
+   # DARAJA_INITIATOR_PASSWORD=...
+   # DARAJA_CERT_FILE=/path/to/SandboxCertificate.cer
+   ```
+
+6. Restart Hesabu and open **Settings → Test connection**. It checks every setting, that your callback address is one Safaricom will call, that your keys get a token from Safaricom, and that the initiator is usable. It never moves money.
+7. Try it for real: make a KES 1 invoice, click **Request M-Pesa**, and enter the phone number registered on the sandbox test credentials (or yours, once live).
+
+The sandbox uses a different test shortcode for paybill (C2B) payments (`600xxx`) than for STK push (`174379`), so test those separately. The connection test warns if the shortcode doesn't fit the environment.
+
+#### 2. Paybill payments customers make on their own
+
+Click **Settings → Register paybill URLs** once (again whenever `PUBLIC_URL` changes). Payments are matched by the account number the customer types:
+
+- an invoice number (`INV-2026-0007`, `inv20260007`) pays that invoice;
+- a client's account code (`ACME`) pays that client's oldest invoices first;
+- anything else, or anything left over, waits under **Payments → M-Pesa money waiting to be placed**.
+
+For a Buy Goods till, set `DARAJA_TYPE=till`, `DARAJA_SHORTCODE` to the store (head office) number and `DARAJA_PARTY_B` to the till number.
+
+#### 3. Going live
+
+1. Use **Go Live** on the Daraja portal for your real paybill or till. Safaricom sends the production passkey once it's approved.
+2. Set `DARAJA_ENV=production`, the production consumer key and secret, the passkey, and your real shortcode. Use your real https domain for `PUBLIC_URL`, and set `NODE_ENV=production`.
+3. For lookups and refunds, your business needs an **API operator (initiator)** on the M-Pesa org portal with permission for Transaction Status and Reversal. Your Safaricom account manager can set that up. Use the *production* certificate for its security credential.
+4. Restart, run **Test connection**, and click **Register paybill URLs** again.
+5. Optional: set `DARAJA_ALLOWED_IPS` to Safaricom's callback addresses (ask Safaricom for the current list) so only they can reach `/hooks`.
+
+#### Trying callbacks without Safaricom
+
+Simulate a paybill payment:
 
 ```bash
 curl -X POST http://localhost:3000/hooks/c2b/YOUR_MPESA_CALLBACK_SECRET/confirm \
   -H 'Content-Type: application/json' \
-  -d '{"TransID":"TEST0001","TransTime":"20260913143015","TransAmount":"5000","BillRefNumber":"ACME","MSISDN":"254711220340","FirstName":"TEST"}'
+  -d '{"TransID":"TEST000001","TransTime":"20260913143015","TransAmount":"5000","BillRefNumber":"ACME","MSISDN":"254711220340","FirstName":"TEST"}'
 ```
+
+Lookups and refunds are answered at `/hooks/async/YOUR_MPESA_CALLBACK_SECRET/result`. A lookup or refund Safaricom never answers is marked after an hour: a lookup as failed, a refund as "no answer". Check your M-Pesa statement before retrying a refund. M-Pesa won't reverse the same payment twice.
 
 ### PostgreSQL
 
@@ -118,7 +171,7 @@ src/routes/               REST endpoints, one file per area
 src/services/documents.js invoices and quotations: totals, stock, status
 src/services/payments.js  recording and reversing payments (row-locked)
 src/services/mpesa.js     STK push, paybill confirmations, matching receipts
-src/services/daraja.js    Safaricom API client
+src/services/daraja.js    Safaricom API client, connection test, initiator credential
 src/services/recurring.js recurring invoice schedules
 src/services/reminders.js reminder stages from the aging data
 src/services/messages.js  email/SMS outbox, delivery and retries

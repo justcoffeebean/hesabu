@@ -54,10 +54,14 @@ export const routes = {
               <h2>M-Pesa (Daraja)</h2>
               <div class="pad">
                 ${integrations.mpesa.ready
-                  ? `<p style="margin-top:0"><span class="pill active">connected</span> ${esc(integrations.mpesa.env)} · ${integrations.mpesa.type === 'till' ? 'till' : 'paybill'} ${esc(integrations.mpesa.shortcode)}</p>
+                  ? `<p style="margin-top:0"><span class="pill active">set up</span> ${esc(integrations.mpesa.env)} · ${integrations.mpesa.type === 'till' ? 'till' : 'paybill'} ${esc(integrations.mpesa.shortcode)}</p>
                      <p class="sub">"Request M-Pesa" on an invoice sends a payment prompt to the customer's phone. To have paybill payments customers make on their own recorded automatically, register your confirmation URL with Safaricom once:</p>
-                     <button class="ghost" data-act="register-c2b">Register paybill URLs</button>`
+                     <p><button class="ghost" data-act="register-c2b">Register paybill URLs</button></p>
+                     <p class="sub">Looking up missed payments and refunding customers: ${integrations.mpesa.commandsReady
+                       ? '<span class="pill active">on</span>'
+                       : '<span class="pill">off</span> needs an initiator in <code>.env</code> (see the README).'}</p>`
                   : `<p style="margin-top:0"><span class="pill off">not set up</span></p><p class="sub">Add your Daraja keys, shortcode, passkey, PUBLIC_URL and MPESA_CALLBACK_SECRET to <code>.env</code> and restart. Until then payments are recorded by hand.</p>`}
+                <p><button class="ghost" data-act="test-mpesa">Test connection</button></p>
               </div>
             </section>
             <section class="sheet-block">
@@ -124,6 +128,17 @@ export const actions = {
     toast('Removed.');
     app.render();
   },
+  'test-mpesa': async () => {
+    openSheet('M-Pesa connection test', '<p style="margin-top:0" role="status">Checking your settings with Safaricom…</p>', null, '', { hideSave: true, cancelLabel: 'Close' });
+    const r = await api('/settings/mpesa/test', 'POST');
+    const ICON = { ok: ['active', 'ok'], warn: ['', 'check'], error: ['off', 'problem'], info: ['', 'optional'] };
+    document.getElementById('sheetBody').innerHTML = `
+      <p style="margin-top:0">${r.ok ? 'Everything Hesabu can check from here looks right. Nothing was charged or sent to anyone.' : 'Fix the problems below in <code>.env</code>, restart Hesabu, and test again.'}</p>
+      <ul class="checklist">${r.checks.map((c) => `<li><span class="pill ${ICON[c.status][0]}">${ICON[c.status][1]}</span>
+        <div><b>${esc(c.name)}</b><div class="sub">${esc(c.detail)}</div></div></li>`).join('')}</ul>
+      ${r.ok ? '<p class="sub">To try a real payment: make a KES 1 invoice and use <b>Request M-Pesa</b> on it with your own phone.</p>' : ''}`;
+  },
+
   'register-c2b': async () => {
     await api('/settings/mpesa/register-urls', 'POST');
     toast('Registered. Paybill payments will now record themselves.');

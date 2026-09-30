@@ -303,6 +303,25 @@ async function useSecondFactor(trx, userId, input) {
   return null;
 }
 
+/**
+ * Re-checks who is at the keyboard before something that moves money out:
+ * their password, and their two-step code when it's on. Shares the
+ * per-user budget of wrong tries with the account screen.
+ */
+async function confirmIdentity(req, { password, code } = {}) {
+  if (!(await passwordTries.take(req.user.id))) fail(429, 'Too many wrong tries. Wait 15 minutes and try again.');
+  const user = await db.knex('users').where({ id: req.user.id }).first();
+  if (!(await verifyPassword(password, user.password_hash))) fail(400, 'Your password is wrong.');
+  if (user.totp_secret) {
+    if (!code) {
+      await passwordTries.giveBack(req.user.id); // right password, code not asked for yet: not a wrong guess
+      fail(400, 'Enter the code from your authenticator app too.', { needsCode: true });
+    }
+    if (!(await db.tx((trx) => useSecondFactor(trx, user.id, code)))) fail(400, 'That code is wrong or was already used.', { needsCode: true });
+  }
+  await passwordTries.giveBack(req.user.id);
+}
+
 /* ---------- first run ---------- */
 
 let generatedSetupCode = null;
@@ -335,6 +354,6 @@ module.exports = {
   hashPassword, verifyPassword, checkPasswordStrength, sha256, token, limiter, WINDOW_MS,
   startSession, endSession, loadUser, requireUser, allow, sameOrigin, knownDevice, DEVICE_COOKIE,
   loginAttempt, setupTries, passwordTries, prune,
-  TWO_STEP_ROLES, mustEnrol, useSecondFactor,
+  TWO_STEP_ROLES, mustEnrol, useSecondFactor, confirmIdentity,
   setupCode, setupCodeMatches, publicUser, parseCookies
 };
