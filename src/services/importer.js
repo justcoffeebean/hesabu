@@ -197,7 +197,7 @@ const KINDS = {
 };
 
 function kindOf(name) {
-  const kind = KINDS[name];
+  const kind = Object.hasOwn(KINDS, name) ? KINDS[name] : null; // not 'constructor', '__proto__', …
   if (!kind) fail(404, 'You can import clients, items or balances.');
   return kind;
 }

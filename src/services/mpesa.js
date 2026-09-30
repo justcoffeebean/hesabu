@@ -11,7 +11,16 @@
  * receipt number, so Safaricom retrying a callback can't double-count), and
  * is then allocated to invoices. Whatever can't be matched waits in the
  * unallocated list for a person to place.
+ *
+ * Two things go the other way, as "commands" Safaricom answers later at
+ * /hooks/async/<secret>/result:
+ *
+ *   Lookup    Ask about a receipt code whose callback never came (the
+ *             customer shows you the SMS); if it paid us, record it.
+ *   Refund    Reverse a whole receipt back to the customer; once Safaricom
+ *             confirms, every payment made from it is reversed in the books.
  */
+const config = require('../config');
 const db = require('../db');
 const daraja = require('./daraja');
 const { audit } = require('../audit');
@@ -19,7 +28,7 @@ const { fail } = require('../errors');
 const { today } = require('../dates');
 const { toAmount, toCents, formatCents } = require('../totals');
 const { paidByInvoice } = require('./documents');
-const { recordPayment, lockedBalance } = require('./payments');
+const { recordPayment, reversePayment, lockedBalance } = require('./payments');
 
 const MPESA = { id: null, name: 'M-Pesa' };
 
@@ -252,6 +261,10 @@ async function allocateManually(actor, transactionId, invoiceId, amount) {
   return db.tx(async (trx) => {
     const txn = await db.lock(trx('mpesa_transactions').where({ id: transactionId })).first();
     if (!txn) fail(404, 'M-Pesa receipt not found.');
+    if (txn.refunded_at) fail(400, 'This money was refunded to the customer.');
+    if (await trx('mpesa_commands').where({ kind: 'refund', mpesa_transaction_id: txn.id }).whereIn('status', ['pending', 'unknown']).first()) {
+      fail(400, 'A refund of this receipt is waiting for Safaricom. Wait for it to finish first.');
+    }
     const remaining = Number(txn.amount_cents) - Number(txn.allocated_cents);
     if (remaining <= 0) fail(400, 'All of this receipt has already been placed.');
     const inv = await trx('invoices').where({ id: invoiceId }).first();
@@ -269,14 +282,245 @@ async function allocateManually(actor, transactionId, invoiceId, amount) {
 }
 
 async function unallocated(conn = db.knex) {
-  const rows = await conn('mpesa_transactions').whereRaw('amount_cents > allocated_cents').orderBy('date', 'desc');
+  const rows = await conn('mpesa_transactions').whereRaw('amount_cents > allocated_cents').whereNull('refunded_at').orderBy('date', 'desc');
+  const refunds = await refundStates(conn, rows.map((t) => t.id));
   return rows.map((t) => ({
     id: t.id, receipt: t.receipt, source: t.source, date: t.date, phone: t.phone, payerName: t.payer_name,
-    billRef: t.bill_ref, amount: toAmount(t.amount_cents), left: toAmount(t.amount_cents - t.allocated_cents)
+    billRef: t.bill_ref, amount: toAmount(t.amount_cents), left: toAmount(t.amount_cents - t.allocated_cents),
+    refund: refunds.get(t.id) || null
   }));
+}
+
+/* ---------- commands: lookups and refunds ---------- */
+
+const RECEIPT = /^[A-Z0-9]{10}$/; // M-Pesa receipt codes are always 10 characters, like SJ84K2LQ01
+const OPEN = ['pending', 'unknown']; // unknown: Safaricom never answered, so it may or may not have happened
+
+function commandOut(c) {
+  return {
+    id: c.id, kind: c.kind, receipt: c.receipt, invoiceId: c.invoice_id || null, transactionId: c.mpesa_transaction_id || null,
+    amount: c.amount_cents === null || c.amount_cents === undefined ? null : toAmount(c.amount_cents),
+    reason: c.reason || null, status: c.status, resultDesc: c.result_desc || null, createdAt: c.created_at, updatedAt: c.updated_at || null
+  };
+}
+
+/** Latest refund state per transaction: { status, resultDesc } for the payments screen. */
+async function refundStates(conn, transactionIds) {
+  const out = new Map();
+  if (!transactionIds.length) return out;
+  const rows = await conn('mpesa_commands').where({ kind: 'refund' }).whereIn('mpesa_transaction_id', transactionIds).orderBy('created_at');
+  rows.forEach((c) => out.set(c.mpesa_transaction_id, { id: c.id, status: c.status, resultDesc: c.result_desc || null }));
+  return out;
+}
+
+async function getCommand(id) {
+  const row = await db.knex('mpesa_commands').where({ id }).first();
+  if (!row) fail(404, 'Not found.');
+  return commandOut(row);
+}
+
+async function recentCommands(limit = 10) {
+  return (await db.knex('mpesa_commands').orderBy('created_at', 'desc').limit(limit)).map(commandOut);
+}
+
+/** Sends the command to Safaricom for a row already saved as pending; marks it failed if Safaricom won't take it. */
+async function dispatch(row, send) {
+  let response;
+  try {
+    response = await send();
+    if (String(response.ResponseCode) !== '0') {
+      const e = new Error(`M-Pesa didn't accept it: ${response.ResponseDescription || response.errorMessage || 'unknown reason'}.`);
+      e.status = 502;
+      throw e;
+    }
+  } catch (err) {
+    await db.knex('mpesa_commands').where({ id: row.id }).update({ status: 'failed', result_desc: String(err.message).slice(0, 300), updated_at: db.now() });
+    throw err;
+  }
+  const ids = {
+    originator_conversation_id: response.OriginatorConversationID ? String(response.OriginatorConversationID) : null,
+    conversation_id: response.ConversationID ? String(response.ConversationID) : null
+  };
+  await db.knex('mpesa_commands').where({ id: row.id }).update({ ...ids, updated_at: db.now() });
+  return { ...row, ...ids };
+}
+
+/** "Look up an M-Pesa code": for a payment whose callback never arrived. */
+async function lookupReceipt(actor, { receipt, invoiceId }) {
+  const code = normalizeRef(receipt);
+  if (!RECEIPT.test(code)) fail(400, 'Enter the M-Pesa code from the SMS, like SJ84K2LQ01.');
+  const known = await db.knex('mpesa_transactions').where({ receipt: code }).first();
+  if (known) {
+    fail(409, `${code} is already in Hesabu${Number(known.amount_cents) > Number(known.allocated_cents) && !known.refunded_at ? ', waiting to be placed' : ''}.`);
+  }
+  if (invoiceId) {
+    const inv = await db.knex('invoices').where({ id: invoiceId }).first();
+    if (!inv) fail(400, 'Pick the invoice this payment is for.');
+    if (inv.currency !== 'KES') fail(400, `${inv.number} is in ${inv.currency}; M-Pesa payments are in shillings.`);
+    if (inv.status === 'cancelled') fail(400, `${inv.number} was cancelled.`);
+  }
+
+  const row = await db.tx(async (trx) => {
+    const waiting = await trx('mpesa_commands').where({ kind: 'lookup', receipt: code }).whereIn('status', OPEN).first();
+    if (waiting) return { ...waiting, existing: true };
+    const r = {
+      id: db.newId(), kind: 'lookup', receipt: code, invoice_id: invoiceId || null, status: 'pending',
+      requested_by: actor?.user?.id || null, created_at: db.now()
+    };
+    await trx('mpesa_commands').insert(r);
+    await audit(trx, actor, { action: 'mpesa-lookup', entity: 'mpesa', entityId: r.id, summary: `Asked M-Pesa about receipt ${code}` });
+    return r;
+  });
+  if (row.existing) return commandOut(row);
+  return commandOut(await dispatch(row, () => daraja.transactionStatus(code)));
+}
+
+/** "Refund by M-Pesa": sends a whole receipt back to the customer. Owner only; the route confirms their password first. */
+async function refundTransaction(actor, transactionId, reason) {
+  const why = String(reason || '').trim();
+  if (!why) fail(400, 'Say why this money is going back. It goes in the audit log and on the M-Pesa request.');
+
+  const row = await db.tx(async (trx) => {
+    // Locked so two clicks (or two owners) can't send the same refund twice.
+    const txn = await db.lock(trx('mpesa_transactions').where({ id: transactionId })).first();
+    if (!txn) fail(404, 'M-Pesa receipt not found.');
+    if (!txn.receipt) fail(400, "This payment doesn't have an M-Pesa receipt yet, so it can't be refunded.");
+    if (txn.refunded_at) fail(400, `${txn.receipt} was already refunded.`);
+    const open = await trx('mpesa_commands').where({ kind: 'refund', mpesa_transaction_id: txn.id }).whereIn('status', OPEN).first();
+    if (open?.status === 'pending') fail(409, `A refund of ${txn.receipt} is already waiting for Safaricom.`);
+    // "unknown" means Safaricom never answered. Retrying is safe: M-Pesa refuses to reverse the same receipt twice.
+    const r = {
+      id: db.newId(), kind: 'refund', receipt: txn.receipt, mpesa_transaction_id: txn.id, amount_cents: Number(txn.amount_cents),
+      reason: why.slice(0, 200), status: 'pending', requested_by: actor?.user?.id || null, created_at: db.now()
+    };
+    if (open) await trx('mpesa_commands').where({ id: open.id }).update({ status: 'failed', result_desc: 'Superseded by a new refund request.', updated_at: db.now() });
+    await trx('mpesa_commands').insert(r);
+    await audit(trx, actor, {
+      action: 'mpesa-refund', entity: 'mpesa', entityId: txn.id,
+      summary: `Asked M-Pesa to refund KES ${formatCents(txn.amount_cents)} (${txn.receipt}) to ${txn.payer_name || txn.phone || 'the customer'}: ${why}`
+    });
+    return r;
+  });
+  // M-Pesa moves whole shillings, and a reversal is always for the whole receipt.
+  return commandOut(await dispatch(row, () => daraja.reversal(row.receipt, Math.round(row.amount_cents / 100), why)));
+}
+
+function resultParams(result) {
+  const list = result?.ResultParameters?.ResultParameter;
+  const items = Array.isArray(list) ? list : list ? [list] : [];
+  return Object.fromEntries(items.map((p) => [p.Key, p.Value]));
+}
+
+/** Safaricom's answer to a lookup or refund, at /hooks/async/<secret>/result (or /timeout). Safe to receive more than once. */
+async function handleCommandResult(body, { timedOut = false } = {}) {
+  const r = body && body.Result;
+  if (!r) return { ignored: 'not a command result' };
+  const params = resultParams(r);
+
+  return db.tx(async (trx) => {
+    let cmd = null;
+    for (const [column, value] of [['originator_conversation_id', r.OriginatorConversationID], ['conversation_id', r.ConversationID]]) {
+      if (!cmd && value) cmd = await db.lock(trx('mpesa_commands').where({ [column]: String(value) })).first();
+    }
+    // An answer can beat us to saving the conversation IDs; fall back to the receipt it's about.
+    const about = normalizeRef(params.ReceiptNo || params.OriginalTransactionID || '');
+    if (!cmd && about) {
+      cmd = await db.lock(trx('mpesa_commands').where({ receipt: about }).whereIn('status', OPEN).orderBy('created_at', 'desc')).first();
+    }
+    if (!cmd) return { ignored: 'unknown command' };
+    if (!OPEN.includes(cmd.status)) return { duplicate: true };
+
+    const settle = (status, desc, extra = {}) => trx('mpesa_commands').where({ id: cmd.id }).update({
+      status, result_code: r.ResultCode === undefined ? null : String(r.ResultCode), result_desc: String(desc).slice(0, 300),
+      result_raw: JSON.stringify(body), updated_at: db.now(), ...extra
+    });
+
+    if (timedOut) {
+      // For a refund we can't be sure nothing happened, so it stays open as "unknown" rather than "failed".
+      if (cmd.kind === 'refund') await settle('unknown', "Safaricom's queue timed out. Check your M-Pesa statement, then try the refund again if the money is still there.");
+      else await settle('failed', 'Safaricom took too long to answer. Try the lookup again.');
+      return { status: 'timeout' };
+    }
+    if (String(r.ResultCode) !== '0') {
+      await settle('failed', r.ResultDesc || 'M-Pesa refused.');
+      await audit(trx, MPESA, { action: `mpesa-${cmd.kind}`, entity: 'mpesa', entityId: cmd.mpesa_transaction_id || cmd.id, summary: `M-Pesa ${cmd.kind} of ${cmd.receipt} failed: ${r.ResultDesc || r.ResultCode}` });
+      return { status: 'failed' };
+    }
+    return cmd.kind === 'lookup' ? finishLookup(trx, cmd, params, body, settle) : finishRefund(trx, cmd, r, settle);
+  });
+}
+
+async function finishLookup(trx, cmd, params, body, settle) {
+  const state = String(params.TransactionStatus || '');
+  if (state && state.toLowerCase() !== 'completed') {
+    await settle('failed', `M-Pesa says this payment is "${state}", not completed.`);
+    return { status: 'failed' };
+  }
+  // Only money that came to us. "600984 - Business Name"
+  const credit = String(params.CreditPartyName || '').trim();
+  const ours = [config.daraja.shortcode, config.daraja.partyB].filter(Boolean);
+  if (credit && !ours.some((code) => credit.startsWith(code))) {
+    await settle('failed', `That payment went to ${credit.split(' - ')[0]}, not to your ${config.daraja.type}.`);
+    return { status: 'failed' };
+  }
+  const amountCents = toCents(params.Amount);
+  if (!(amountCents > 0)) {
+    await settle('failed', "M-Pesa's answer didn't include an amount.");
+    return { status: 'failed' };
+  }
+  // "254722000111 - Jane Doe" (production may mask digits: "2547*****111 - Jane Doe")
+  const [who, ...name] = String(params.DebitPartyName || '').split(' - ');
+  const phone = /^[\d*]{9,15}$/.test(who.trim()) ? who.trim() : null;
+  const receipt = normalizeRef(params.ReceiptNo || cmd.receipt);
+
+  const txn = await upsertTransaction(trx, {
+    receipt, source: 'c2b', amountCents, phone, payerName: name.join(' - ').trim() || null, billRef: null,
+    date: mpesaDate(params.FinalisedTime || params.InitiatedTime), raw: body
+  });
+  if (txn.duplicate) {
+    await settle('done', 'It was already recorded.', { mpesa_transaction_id: txn.id });
+    return { status: 'done', duplicate: true };
+  }
+  const placed = cmd.invoice_id ? await allocateToInvoice(trx, MPESA, txn, cmd.invoice_id) : 0;
+  const inv = placed ? await trx('invoices').where({ id: cmd.invoice_id }).first() : null;
+  const left = amountCents - placed;
+  const desc = `Found KES ${formatCents(amountCents)}${txn.payer_name ? ` from ${txn.payer_name}` : ''}.` +
+    (placed ? ` Put KES ${formatCents(placed)} on ${inv.number}.` : '') +
+    (left > 0 ? ` KES ${formatCents(left)} is waiting to be placed.` : '');
+  await settle('done', desc, { mpesa_transaction_id: txn.id, amount_cents: amountCents });
+  await audit(trx, MPESA, { action: 'mpesa-found', entity: 'mpesa', entityId: txn.id, summary: `Looked up ${receipt}: ${desc}` });
+  return { status: 'done' };
+}
+
+async function finishRefund(trx, cmd, r, settle) {
+  const txn = await db.lock(trx('mpesa_transactions').where({ id: cmd.mpesa_transaction_id })).first();
+  if (txn.refunded_at) {
+    await settle('done', 'It was already refunded.');
+    return { status: 'done', duplicate: true };
+  }
+  const reversalReceipt = r.TransactionID ? String(r.TransactionID).slice(0, 40) : null;
+  const live = await trx('payments').where({ mpesa_transaction_id: txn.id }).whereNull('reversed_at');
+  for (const p of live) {
+    await reversePayment(trx, MPESA, p.id, `Refunded to the customer by M-Pesa${reversalReceipt ? ` (${reversalReceipt})` : ''}: ${cmd.reason}`);
+  }
+  await trx('mpesa_transactions').where({ id: txn.id }).update({ refunded_at: db.now(), refund_receipt: reversalReceipt });
+  const desc = `Refunded KES ${formatCents(txn.amount_cents)} to ${txn.payer_name || txn.phone || 'the customer'}${live.length ? `; reversed ${live.length} payment${live.length === 1 ? '' : 's'} in the books` : ''}.`;
+  await settle('done', desc);
+  await audit(trx, MPESA, { action: 'mpesa-refunded', entity: 'mpesa', entityId: txn.id, summary: `${txn.receipt}: ${desc}` });
+  return { status: 'done' };
+}
+
+/** Scheduler: requests Safaricom never answered. Lookups just fail; refunds become "unknown" (check the statement). */
+async function expireCommands(olderThanMs = 60 * 60 * 1000) {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  await db.knex('mpesa_commands').where({ kind: 'lookup', status: 'pending' }).where('created_at', '<', cutoff)
+    .update({ status: 'failed', result_desc: 'No answer from Safaricom. Try the lookup again.', updated_at: db.now() });
+  await db.knex('mpesa_commands').where({ kind: 'refund', status: 'pending' }).where('created_at', '<', cutoff)
+    .update({ status: 'unknown', result_desc: 'No answer from Safaricom yet. Check your M-Pesa statement before trying again.', updated_at: db.now() });
 }
 
 module.exports = {
   normalizePhone, normalizeRef, requestStk, requestOut, checkStk, handleStkCallback,
-  handleC2bConfirmation, allocateManually, unallocated
+  handleC2bConfirmation, allocateManually, unallocated,
+  lookupReceipt, refundTransaction, handleCommandResult, getCommand, recentCommands, refundStates, expireCommands, commandOut
 };

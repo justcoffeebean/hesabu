@@ -469,3 +469,13 @@ details summary { cursor: pointer; color: var(--green); font-size: 12.5px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* Two-step recovery codes: easy to read out and copy by hand. */
+.recovery-codes { columns: 2; column-gap: 28px; font-family: ui-monospace, Menlo, monospace; font-size: 15px; letter-spacing: 0.04em; padding-left: 1.8em; margin: 12px 0 14px; }
+.recovery-codes li { padding: 2px 0; }
+
+/* Connection test results. */
+.checklist { list-style: none; padding: 0; margin: 0 0 12px; }
+.checklist li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--rule); }
+.checklist li:last-child { border-bottom: 0; }
+.checklist .pill { flex: none; min-width: 64px; text-align: center; }

@@ -22,12 +22,15 @@ Object.assign(process.env, {
   SMS_TRANSPORT: 'log',
   SETUP_CODE: 'TESTCODE',
   PUBLIC_URL: 'https://hesabu.example.com',
+  TRUST_PROXY: 'loopback', // lets tests pose as different visitors with X-Forwarded-For
   COOKIE_SECURE: 'false',
   MPESA_CALLBACK_SECRET: 'cb-secret-123',
   DARAJA_CONSUMER_KEY: 'key',
   DARAJA_CONSUMER_SECRET: 'secret',
   DARAJA_PASSKEY: 'passkey',
   DARAJA_SHORTCODE: '174379',
+  DARAJA_INITIATOR_NAME: 'testapi',
+  DARAJA_SECURITY_CREDENTIAL: 'test-security-credential',
   DARAJA_BASE_URL: `http://127.0.0.1:${DARAJA_PORT}`,
   APP_TIMEZONE: 'Africa/Nairobi'
 });
@@ -48,6 +51,8 @@ const daraja = {
   calls: [],
   stkResponse: null, // override to simulate a rejection
   queryResponse: { ResponseCode: '0', ResultCode: '0', ResultDesc: 'The service request is processed successfully.' },
+  commandResponse: null, // override to have Safaricom refuse a lookup or refund up front
+  rejectKeys: false, // make OAuth fail, as Safaricom does for wrong keys
   counter: 0
 };
 
@@ -56,8 +61,20 @@ function startDaraja() {
   app.use(express.json());
   app.get('/oauth/v1/generate', (req, res) => {
     daraja.calls.push({ path: req.path, auth: req.get('authorization') });
+    if (daraja.rejectKeys) return res.status(400).json({ errorCode: '400.008.01', errorMessage: 'Invalid Authentication passed' });
     res.json({ access_token: 'tok', expires_in: '3599' });
   });
+  // Transaction Status and Reversal answer "accepted" now; the real result is posted to ResultURL later.
+  for (const path of ['/mpesa/transactionstatus/v1/query', '/mpesa/reversal/v1/request']) {
+    app.post(path, (req, res) => {
+      daraja.calls.push({ path: req.path, body: req.body });
+      daraja.counter += 1;
+      res.json(daraja.commandResponse || {
+        OriginatorConversationID: `oc-${daraja.counter}`, ConversationID: `AG_2026_${daraja.counter}`,
+        ResponseCode: '0', ResponseDescription: 'Accept the service request successfully.'
+      });
+    });
+  }
   app.post('/mpesa/stkpush/v1/processrequest', (req, res) => {
     daraja.calls.push({ path: req.path, body: req.body });
     daraja.counter += 1;
@@ -103,19 +120,22 @@ async function start() {
   };
 }
 
-/** A browser-ish client with its own cookie. */
+/** A browser-ish client with its own cookie jar. */
 function client(base) {
-  let cookie = '';
+  const jar = new Map();
+  const header = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
   const call = async (method, url, body, headers = {}) => {
     const res = await fetch(base + url, {
       method,
-      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers },
+      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(jar.size ? { Cookie: header() } : {}), ...headers },
       body: body !== undefined ? JSON.stringify(body) : undefined
     });
     const set = res.headers.getSetCookie?.() || [];
     for (const c of set) {
       const [pair] = c.split(';');
-      cookie = pair.endsWith('=') ? '' : pair;
+      const i = pair.indexOf('=');
+      const [name, value] = [pair.slice(0, i), pair.slice(i + 1)];
+      if (value) jar.set(name, value); else jar.delete(name);
     }
     const type = res.headers.get('content-type') || '';
     const data = type.includes('json') ? await res.json() : type.includes('pdf') || type.includes('csv') ? Buffer.from(await res.arrayBuffer()) : await res.text();
@@ -126,7 +146,9 @@ function client(base) {
     post: (url, body = {}, headers) => call('POST', url, body, headers),
     put: (url, body = {}, headers) => call('PUT', url, body, headers),
     del: (url, headers) => call('DELETE', url, undefined, headers),
-    get cookie() { return cookie; }
+    /** The session cookie as "name=value", or '' when signed out. */
+    get cookie() { return jar.has('hesabu_session') ? `hesabu_session=${jar.get('hesabu_session')}` : ''; },
+    jar
   };
 }
 

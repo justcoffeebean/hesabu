@@ -1,6 +1,17 @@
-import { api, app, can, state, esc, money, shortDate, table, toast, openSheet, closeSheet, val, field, selectField, today, plural } from '../core.js';
+import { api, app, can, state, esc, money, shortDate, dateTime, table, toast, openSheet, closeSheet, val, field, selectField, today, plural, sheetBody, setSaveLabel } from '../core.js';
 
 let methods = ['M-Pesa', 'Bank transfer', 'Cheque', 'Cash', 'Card', 'Other'];
+
+const COMMAND_STATUS = { pending: ['', 'waiting'], done: ['active', 'done'], failed: ['off', 'failed'], unknown: ['off', 'no answer'] };
+const commandPill = (status) => `<span class="pill ${COMMAND_STATUS[status][0]}">${COMMAND_STATUS[status][1]}</span>`;
+
+/** "Refund" link, or where a refund of this receipt has got to. */
+function refundCell(t, { refundable }) {
+  if (t.refund && ['pending', 'unknown'].includes(t.refund.status)) {
+    return `<span class="sub">Refund ${t.refund.status === 'pending' ? 'waiting for Safaricom' : 'unconfirmed'}</span>${t.refund.status === 'unknown' && refundable ? ` <button class="link danger" data-act="refund" data-id="${esc(t.transactionId)}" data-receipt="${esc(t.receipt)}" data-amount="${t.amount}">Try again</button>` : ''}`;
+  }
+  return refundable ? `<button class="link danger" data-act="refund" data-id="${esc(t.transactionId)}" data-receipt="${esc(t.receipt)}" data-amount="${t.amount}" data-who="${esc(t.who || '')}">Refund</button>` : '';
+}
 
 export const routes = {
   payments: {
@@ -11,9 +22,12 @@ export const routes = {
       methods = data.methods;
       const live = data.payments.filter((p) => !p.reversed);
       const write = can('payments:write');
+      const refunds = can('mpesa:refund') && data.commandsReady;
       return `
         <div class="head"><h1>Payments</h1><p>${plural(live.length, 'payment')} recorded</p>
-          <div class="spacer"></div>${write ? '<button class="solid" data-act="pay">Record payment</button>' : ''}</div>
+          <div class="spacer"></div>
+          ${write && data.commandsReady ? '<button class="ghost" data-act="lookup">Look up M-Pesa code</button>' : ''}
+          ${write ? '<button class="solid" data-act="pay">Record payment</button>' : ''}</div>
 
         ${data.unallocated.length ? `
           <h2 class="section-title" style="margin-top:0">M-Pesa money waiting to be placed</h2>
@@ -25,7 +39,8 @@ export const routes = {
               <td class="num">${esc(t.billRef || '—')}</td>
               <td class="num sub">${esc(t.receipt || 'pending')}</td>
               <td class="right num strong">${money(t.left)}${t.left !== t.amount ? `<div class="sub">of ${money(t.amount)}</div>` : ''}</td>
-              <td class="actions">${write ? `<button class="link" data-act="place" data-id="${esc(t.id)}" data-left="${t.left}" data-label="${esc(`${t.receipt || ''} ${t.payerName || ''}`.trim())}">Place</button>` : ''}</td>
+              <td class="actions">${write && !(t.refund && ['pending', 'unknown'].includes(t.refund.status)) ? `<button class="link" data-act="place" data-id="${esc(t.id)}" data-left="${t.left}" data-label="${esc(`${t.receipt || ''} ${t.payerName || ''}`.trim())}">Place</button>` : ''}
+                ${t.receipt ? refundCell({ transactionId: t.id, receipt: t.receipt, amount: t.amount, who: t.payerName || t.phone, refund: t.refund }, { refundable: refunds }) : ''}</td>
             </tr>`).join(''))}
           </section>` : ''}
 
@@ -38,12 +53,25 @@ export const routes = {
               <td class="num sub">${esc(p.reference || '—')}</td>
               <td class="right num ${p.reversed ? 'struck' : 'strong'}">${p.currency !== state.currencies.base ? `<span class="sub">${esc(p.currency)}</span> ` : ''}${money(p.amount)}</td>
               <td class="actions">${p.reversed
-                ? `<span class="sub">Reversed by ${esc(p.reversedBy || '—')}: ${esc(p.reversalReason)}</span>`
-                : write ? `<button class="link danger" data-act="reverse" data-id="${esc(p.id)}" data-label="${esc(`${p.currency} ${money(p.amount)} on ${p.invoiceNumber}`)}">Reverse</button>` : ''}</td>
+                ? `<span class="sub">Reversed by ${esc(p.reversedBy || (p.mpesa?.refunded ? 'M-Pesa' : '—'))}: ${esc(p.reversalReason)}</span>`
+                : `${write && !(p.mpesa?.refund && ['pending', 'unknown'].includes(p.mpesa.refund.status)) ? `<button class="link danger" data-act="reverse" data-id="${esc(p.id)}" data-label="${esc(`${p.currency} ${money(p.amount)} on ${p.invoiceNumber}`)}">Reverse</button>` : ''}
+                   ${p.mpesa && p.reference && !p.mpesa.refunded ? refundCell({ transactionId: p.mpesa.transactionId, receipt: p.reference, amount: p.mpesa.receiptAmount, who: p.clientName, refund: p.mpesa.refund }, { refundable: refunds }) : ''}`}</td>
             </tr>`).join(''))
           : `<div class="empty"><p>Payments you record against invoices show up here.</p>
               ${write ? '<button class="solid" data-act="pay">Record payment</button>' : ''}</div>`}
-        </section>`;
+        </section>
+
+        ${data.commands.length ? `
+          <h2 class="section-title">M-Pesa lookups and refunds</h2>
+          <section class="sheet-block">
+            ${table('Recent M-Pesa lookups and refunds', [['When'], ['What'], ['Receipt'], ['Status'], ['Result']], data.commands.map((c) => `<tr>
+              <td class="num sub">${dateTime(c.createdAt)}</td>
+              <td>${c.kind === 'refund' ? `Refund${c.amount !== null ? ` of KES ${money(c.amount)}` : ''}` : 'Lookup'}</td>
+              <td class="num">${esc(c.receipt)}</td>
+              <td>${commandPill(c.status)}</td>
+              <td class="sub">${esc(c.resultDesc || (c.status === 'pending' ? 'Waiting for Safaricom…' : ''))}</td>
+            </tr>`).join(''))}
+          </section>` : ''}`;
     }
   }
 };
@@ -94,8 +122,62 @@ export function reverseSheet(paymentId, label) {
   }, 'Reverse payment');
 }
 
+/** Asks every 3 seconds until Safaricom answers (usually a few seconds), for up to a minute. */
+async function waitForAnswer(id, onDone) {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (!document.getElementById('sheet').open) return; // they closed it; the list shows the outcome
+    const c = await api(`/mpesa/commands/${id}`);
+    if (c.status !== 'pending') return onDone(c);
+  }
+  onDone(null);
+}
+
+function showOutcome(c, doneText) {
+  setSaveLabel('', true);
+  document.getElementById('sheetCancel').textContent = 'Close';
+  sheetBody().innerHTML = c
+    ? `<p style="margin-top:0" role="${c.status === 'done' ? 'status' : 'alert'}">${commandPill(c.status)} ${esc(c.resultDesc || doneText)}</p>`
+    : '<p style="margin-top:0" role="status">Safaricom hasn\'t answered yet. The result will show under "M-Pesa lookups and refunds" when it does.</p>';
+  app.render();
+}
+
+export function lookupSheet(invoiceId) {
+  return openInvoices('KES').then((invoices) => {
+    openSheet('Look up an M-Pesa code', `
+      <p style="margin-top:0">For a payment the customer says they made (they have the SMS) that never showed up here. Hesabu asks Safaricom about the code and records it if it paid your paybill or till.</p>
+      ${field('M-Pesa code', 'receipt', { attrs: 'required autocomplete="off" maxlength="12" placeholder="e.g. SJ84K2LQ01" class="num" style="text-transform:uppercase"' })}
+      ${selectField('Put it on', 'invoiceId', [['', 'Nothing yet: leave it waiting to be placed'], ...invoices.map((i) => [i.id, `${i.number} — ${i.clientName} — KES ${money(i.balance)} due`])], invoiceId || '')}`,
+    async () => {
+      const c = await api('/mpesa/lookup', 'POST', { receipt: val('receipt'), invoiceId: val('invoiceId') || null });
+      setSaveLabel('', true);
+      sheetBody().innerHTML = `<p style="margin-top:0" role="status">Asked Safaricom about <b class="num">${esc(c.receipt)}</b>. Waiting for their answer…</p>`;
+      waitForAnswer(c.id, (done) => showOutcome(done, 'Done.'));
+    }, 'Look it up');
+  });
+}
+
+function refundSheet(el) {
+  const amount = Number(el.dataset.amount);
+  openSheet('Refund by M-Pesa', `
+    <p style="margin-top:0">Send <b>KES ${money(amount)}</b> (receipt <span class="num">${esc(el.dataset.receipt)}</span>) back to ${esc(el.dataset.who || 'the customer')}.</p>
+    <p class="sub">M-Pesa refunds the whole receipt. Once Safaricom confirms, every payment made from it is reversed in the books and those invoices are owed again. This can't be undone from Hesabu.</p>
+    ${field('Reason', 'reason', { attrs: 'required maxlength="100" placeholder="e.g. Paid twice, wrong paybill"' })}
+    ${field('Your password', 'password', { type: 'password', attrs: 'autocomplete="current-password"' })}
+    ${state.me.twoStep ? field('Code from your authenticator app', 'code', { attrs: 'autocomplete="one-time-code" inputmode="numeric" class="num"' }) : ''}`,
+  async () => {
+    const c = await api(`/mpesa/transactions/${el.dataset.id}/refund`, 'POST', { reason: val('reason'), password: val('password'), code: val('code') || undefined });
+    setSaveLabel('', true);
+    sheetBody().innerHTML = '<p style="margin-top:0" role="status">Sent to Safaricom. Waiting for them to confirm the refund…</p>';
+    app.render();
+    waitForAnswer(c.id, (done) => showOutcome(done, 'Refunded.'));
+  }, `Refund KES ${money(amount)}`);
+}
+
 export const actions = {
   pay: (el) => recordPaymentSheet(el.dataset.id),
+  lookup: (el) => lookupSheet(el.dataset.id),
+  refund: (el) => refundSheet(el),
   reverse: (el) => reverseSheet(el.dataset.id, el.dataset.label),
 
   place: async (el) => {

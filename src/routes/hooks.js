@@ -1,5 +1,6 @@
 /**
- * Callbacks from Safaricom. These sit outside /api and outside sign-in; they
+ * Callbacks from Safaricom: STK results, paybill confirmations, and answers to
+ * receipt lookups and refunds. These sit outside /api and outside sign-in; they
  * are protected by the secret in the URL (MPESA_CALLBACK_SECRET) and,
  * optionally, a list of Safaricom's IP addresses (DARAJA_ALLOWED_IPS).
  *
@@ -72,6 +73,19 @@ router.post('/hooks/c2b/:secret/confirm', guard, async (req, res) => {
     await mpesa.handleC2bConfirmation(req.body);
   } catch (err) {
     await rescue('c2b', req.body, err);
+  }
+  res.json(ACCEPTED);
+});
+
+/** Answers to receipt lookups (Transaction Status) and refunds (Reversal). "async", not "cmd": Daraja rejects that. */
+router.post('/hooks/async/:secret/:outcome', guard, async (req, res) => {
+  const { outcome } = req.params;
+  if (outcome !== 'result' && outcome !== 'timeout') return res.status(404).json({ error: 'Not found' });
+  try {
+    await mpesa.handleCommandResult(req.body, { timedOut: outcome === 'timeout' });
+  } catch (err) {
+    // Nothing to rescue into the books here, but keep the raw answer so a person can act on it.
+    console.error(`[hooks] command ${outcome} processing failed: ${err.message}`, JSON.stringify(req.body));
   }
   res.json(ACCEPTED);
 });

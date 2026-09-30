@@ -1,4 +1,4 @@
-/** Team management (owner only): invite people, change roles, switch accounts off, send reset links. */
+/** Team management (owner only): invite people, change roles, switch accounts off, send reset links, two-step sign-in. */
 const express = require('express');
 const config = require('../config');
 const db = require('../db');
@@ -9,12 +9,22 @@ const { audit } = require('../audit');
 const { fail } = require('../errors');
 const { text, email, oneOf } = require('../validate');
 const messages = require('../services/messages');
+const settings = require('../settings');
 
 const router = express.Router();
 const LINK_HOURS = { invite: 72, reset: 24 };
 
+/**
+ * Where links in emails point. PUBLIC_URL when set (it must be in production).
+ * Otherwise the address the owner's own browser is on — taken from Origin,
+ * which sameOrigin() has already matched to this server — never from a bare
+ * Host header, which anyone can set to their own domain.
+ */
 function baseUrl(req) {
-  return config.publicUrl || `${req.protocol}://${req.get('host')}`;
+  if (config.publicUrl) return config.publicUrl;
+  const origin = req.get('origin');
+  if (!origin) fail(400, 'Set PUBLIC_URL in .env so sign-in links point at the right address.');
+  return new URL(origin).origin;
 }
 
 /** Creates a one-time link, and emails it when email is set up. The owner always sees the link to share another way. */
@@ -42,7 +52,7 @@ async function issueLink(trx, req, user, purpose) {
 
 const userOut = (u) => ({
   id: u.id, email: u.email, name: u.name, role: u.role, active: Boolean(u.active),
-  hasPassword: Boolean(u.password_hash), lastLoginAt: u.last_login_at || null, createdAt: u.created_at
+  hasPassword: Boolean(u.password_hash), twoStep: Boolean(u.totp_secret), lastLoginAt: u.last_login_at || null, createdAt: u.created_at
 });
 
 router.get('/users', allow('users:manage'), async (_req, res) => {
@@ -107,6 +117,46 @@ router.post('/users/:id/reset-link', allow('users:manage'), async (req, res) => 
   });
   if (out.emailed) messages.kick(out.emailed);
   res.json({ ...out, emailed: Boolean(out.emailed) && messages.channelStatus().email === 'smtp' });
+});
+
+/** Lost phone: turn two-step off for someone so they can sign in with just their password and set it up again. */
+router.post('/users/:id/two-step/reset', allow('users:manage'), async (req, res) => {
+  if (req.params.id === req.user.id) fail(400, 'Turn your own two-step sign-in off from your account, or ask another owner.');
+  const out = await db.tx(async (trx) => {
+    const user = await db.lock(trx('users').where({ id: req.params.id })).first();
+    if (!user) fail(404, 'User not found.');
+    if (!user.totp_secret) fail(400, `${user.name} doesn't have two-step sign-in on.`);
+    await trx('users').where({ id: user.id }).update({
+      totp_secret: null, totp_pending: null, totp_last_step: null, totp_recovery: null, totp_enabled_at: null, updated_at: db.now()
+    });
+    await trx('sessions').where({ user_id: user.id }).del();
+    await audit(trx, req, { action: 'two-step', entity: 'user', entityId: user.id, summary: `Turned off two-step sign-in for ${user.name}` });
+    return userOut(await trx('users').where({ id: user.id }).first());
+  });
+  res.json(out);
+});
+
+/* ---------- business-wide sign-in rules ---------- */
+
+router.get('/team/security', allow('users:manage'), async (_req, res) => {
+  res.json(await settings.security());
+});
+
+router.put('/team/security', allow('users:manage'), async (req, res) => {
+  const requireTwoStep = Boolean(req.body?.requireTwoStep);
+  // Otherwise the owner switching it on would be the first person locked behind it.
+  if (requireTwoStep && !req.user.twoStep) fail(400, 'Turn on two-step sign-in for yourself first (your name, bottom left).');
+  const out = await db.tx(async (trx) => {
+    const before = await settings.security(trx);
+    const after = { ...before, requireTwoStep };
+    await db.putSetting(trx, 'security', after);
+    await audit(trx, req, {
+      action: 'update', entity: 'settings',
+      summary: requireTwoStep ? 'Required two-step sign-in for owner and accounts' : 'Made two-step sign-in optional', before, after
+    });
+    return after;
+  });
+  res.json(out);
 });
 
 module.exports = router;

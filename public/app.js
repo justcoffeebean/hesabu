@@ -3,7 +3,7 @@
    handled by the matching function in `actions`. Routes live in the URL hash
    (#/invoices/abc123) so reloads and links land in the right place. */
 
-import { state, app, api, can, toast, esc, whenSignedOut, loadReference } from './js/core.js';
+import { state, app, api, can, toast, esc, whenSignedOut, whenMustEnrol, loadReference } from './js/core.js';
 import * as gate from './js/views/gate.js';
 import * as today from './js/views/today.js';
 import * as quotations from './js/views/quotations.js';
@@ -120,6 +120,12 @@ async function chrome() {
 }
 
 async function enter(me) {
+  if (me.mustEnrol) {
+    state.me = null;
+    shell.hidden = true;
+    main.innerHTML = '';
+    return gate.showEnrol(me);
+  }
   state.me = me;
   gateEl.hidden = true;
   gateEl.innerHTML = ''; // no stale sign-in form lingering in the page
@@ -147,6 +153,7 @@ app.signOut = () => {
 };
 
 whenSignedOut(() => { if (state.me) { toast('Your session ended. Please sign in again.', true); app.signOut(); } });
+whenMustEnrol(async () => { if (state.me) await enter(await api('/auth/me')); });
 
 actions.reload = () => render();
 

@@ -1,6 +1,7 @@
 import { api, app, state, esc, dateTime, table, toast, openSheet, closeSheet, val, field, selectField, copyToClipboard, sheetBody, setSaveLabel } from '../core.js';
 
 let users = [];
+let security = { requireTwoStep: false };
 
 const ROLES = [
   ['staff', 'Staff — jobs, quotations, stock counts, M-Pesa requests'],
@@ -13,23 +14,32 @@ export const routes = {
     title: 'Team',
     permission: 'users:manage',
     async render() {
-      users = await api('/users');
+      [users, security] = await Promise.all([api('/users'), api('/team/security')]);
       return `
         <div class="head"><h1>Team</h1><p>Everyone who can sign in to Hesabu</p><div class="spacer"></div>
           <button class="solid" data-act="invite">Add someone</button></div>
         <section class="sheet-block">
-          ${table('Team members', [['Name'], ['Role'], ['Last signed in'], ['Status'], ['']], users.map((u) => `<tr>
+          ${table('Team members', [['Name'], ['Role'], ['Last signed in'], ['Two-step'], ['Status'], ['']], users.map((u) => `<tr>
             <td><span class="strong">${esc(u.name)}</span>${u.id === state.me.id ? ' <span class="sub">(you)</span>' : ''}<div class="sub">${esc(u.email)}</div></td>
             <td style="text-transform:capitalize">${esc(u.role)}</td>
             <td class="num sub">${u.lastLoginAt ? dateTime(u.lastLoginAt) : u.hasPassword ? 'Never' : 'Invite not accepted'}</td>
+            <td>${u.twoStep ? '<span class="pill active">on</span>' : `<span class="pill ${security.requireTwoStep && u.role !== 'staff' ? 'off' : ''}">off</span>`}</td>
             <td>${u.active ? '<span class="pill active">active</span>' : '<span class="pill off">switched off</span>'}</td>
             <td class="actions">
               <button class="link" data-act="edit-user" data-id="${esc(u.id)}" aria-label="Edit ${esc(u.name)}">Edit</button>
+              ${u.twoStep && u.id !== state.me.id ? `<button class="link" data-act="reset-two-step" data-id="${esc(u.id)}" aria-label="Reset two-step sign-in for ${esc(u.name)}">Reset two-step</button>` : ''}
               ${u.active ? `<button class="link" data-act="reset-link" data-id="${esc(u.id)}" aria-label="${u.hasPassword ? 'Password reset link' : 'New invite link'} for ${esc(u.name)}">${u.hasPassword ? 'Reset password' : 'Resend invite'}</button>` : ''}
               ${u.id !== state.me.id ? `<button class="link ${u.active ? 'danger' : ''}" data-act="toggle-user" data-id="${esc(u.id)}" aria-label="${u.active ? 'Switch off' : 'Switch on'} ${esc(u.name)}">${u.active ? 'Switch off' : 'Switch on'}</button>` : ''}
             </td></tr>`).join(''))}
         </section>
-        <p class="lede" style="margin-top:14px">Switching someone off signs them out straight away. Their name stays on everything they did.</p>`;
+        <p class="lede" style="margin-top:14px">Switching someone off signs them out straight away. Their name stays on everything they did.</p>
+        <section class="sheet-block" style="margin-top:18px" aria-labelledby="sec-h">
+          <h2 id="sec-h">Sign-in rules</h2>
+          <div class="pad"><label class="check"><input type="checkbox" data-act="require-two-step" ${security.requireTwoStep ? 'checked' : ''}>
+            Require two-step sign-in for owners and accounts</label>
+          <p class="hint">They handle the money, so a stolen password shouldn't be enough. Anyone in those roles without it
+            is asked to set it up the next time they use Hesabu. ${state.me.twoStep ? '' : 'Turn it on for yourself first (your name, bottom left).'}</p></div>
+        </section>`;
     }
   }
 };
@@ -82,6 +92,24 @@ export const actions = {
     } catch (err) {
       closeSheet();
       throw err;
+    }
+  },
+
+  'reset-two-step': async (el) => {
+    const u = users.find((x) => x.id === el.dataset.id);
+    if (!confirm(`Turn off two-step sign-in for ${u.name}? Do this when they've lost their phone and their recovery codes. They're signed out, then sign in with just their password and can set it up again.`)) return;
+    await api(`/users/${u.id}/two-step/reset`, 'POST');
+    toast(`Two-step sign-in is off for ${u.name}.`);
+    app.render();
+  },
+
+  'require-two-step': async (el) => {
+    const on = el.checked;
+    try {
+      await api('/team/security', 'PUT', { requireTwoStep: on });
+      toast(on ? 'Two-step sign-in is now required for owners and accounts.' : 'Two-step sign-in is now optional.');
+    } finally {
+      app.render();
     }
   },
 

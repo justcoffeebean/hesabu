@@ -1,5 +1,7 @@
-/* Signed-out screens: sign in, first-run setup, and choosing a password from an invite or reset link. */
+/* Signed-out screens: sign in, first-run setup, choosing a password from an invite or reset link,
+   and the stop for people whose business requires two-step sign-in before they've set it up. */
 import { api, app, esc } from '../core.js';
+import { enrolTwoStep } from '../twostep.js';
 
 const gate = document.getElementById('gate');
 
@@ -21,7 +23,7 @@ function show(html, onSubmit) {
       await onSubmit(data);
     } catch (err) {
       error.textContent = err.message;
-      const first = form.querySelector('input[aria-invalid], input');
+      const first = form.querySelector('input[aria-invalid], input:not([hidden])');
       if (first) first.focus();
     } finally {
       button.disabled = false;
@@ -34,6 +36,25 @@ function show(html, onSubmit) {
 const input = (label, name, type = 'text', attrs = '') =>
   `<div class="field"><label for="g-${name}">${label}</label><input id="g-${name}" name="${name}" type="${type}" ${attrs}></div>`;
 
+/** Hidden until the server says this account needs one. Takes a 6-digit code or a recovery code. */
+const codeField = (hidden = true) => `<div class="field" id="g-code-field" ${hidden ? 'hidden' : ''}>
+  <label for="g-code">Code from your authenticator app</label>
+  <input id="g-code" name="code" autocomplete="one-time-code" inputmode="numeric" class="num" aria-describedby="g-code-hint">
+  <p class="hint" id="g-code-hint">Lost your phone? Type one of your recovery codes instead.</p></div>`;
+
+function askForCode(err) {
+  const box = document.getElementById('g-code-field');
+  if (!err.data?.needsCode || !box) throw err;
+  const first = box.hidden;
+  box.hidden = false;
+  const code = document.getElementById('g-code');
+  code.value = '';
+  // Let the submit handler's focus run first, then land on the code box.
+  setTimeout(() => code.focus());
+  // The first time, it isn't an error: they just haven't been asked yet.
+  throw first ? new Error('') : err;
+}
+
 export function showSignIn() {
   document.title = 'Sign in · Hesabu';
   show(`
@@ -42,12 +63,14 @@ export function showSignIn() {
     <form novalidate>
       ${input('Email', 'email', 'email', 'autocomplete="username" required')}
       ${input('Password', 'password', 'password', 'autocomplete="current-password" required')}
+      ${codeField()}
       <p class="form-error" role="alert"></p>
       <button type="submit" class="solid">Sign in</button>
     </form>
     <p class="hint" style="margin-top:16px">Forgot your password? Ask the owner to send you a reset link from Team.</p>`,
   async (data) => {
-    const me = await api('/auth/login', 'POST', { email: data.email, password: data.password });
+    const me = await api('/auth/login', 'POST', { email: data.email, password: data.password, code: data.code || undefined })
+      .catch(askForCode);
     await app.enter(me);
   });
 }
@@ -96,13 +119,32 @@ export async function showLink(token) {
         <input id="g-password" name="password" type="password" autocomplete="new-password" minlength="10" required aria-describedby="g-pw-hint">
         <p class="hint" id="g-pw-hint">At least 10 characters.</p></div>
       ${input('Type it again', 'confirm', 'password', 'autocomplete="new-password" required')}
+      ${codeField(!info.twoStep)}
       <p class="form-error" role="alert"></p>
       <button type="submit" class="solid">Save password and continue</button>
     </form>`,
   async (data) => {
     if (data.password !== data.confirm) throw new Error("The two passwords don't match.");
-    const me = await api(`/auth/link/${encodeURIComponent(token)}`, 'POST', { password: data.password });
+    const me = await api(`/auth/link/${encodeURIComponent(token)}`, 'POST', { password: data.password, code: data.code || undefined })
+      .catch(askForCode);
     history.replaceState(null, '', '#/today');
     await app.enter(me);
+  });
+}
+
+/** Signed in, but the business requires two-step sign-in and this person hasn't set it up yet. */
+export function showEnrol(me) {
+  document.title = 'Two-step sign-in · Hesabu';
+  show(`
+    <h1>One more step, ${esc(me.name)}</h1>
+    <p class="lede">Your business requires two-step sign-in for owners and accounts. It takes about a minute:
+      you'll need your password and a phone with an authenticator app.</p>
+    <form novalidate>
+      <p class="form-error" role="alert"></p>
+      <button type="submit" class="solid">Set it up</button>
+    </form>
+    <p class="hint" style="margin-top:16px">Not now? <button type="button" class="link" data-act="sign-out">Sign out</button></p>`,
+  async () => {
+    enrolTwoStep((updated) => app.enter(updated));
   });
 }

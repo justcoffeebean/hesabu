@@ -28,6 +28,8 @@ const config = {
   session: {
     cookie: 'hesabu_session',
     days: Number(env.SESSION_DAYS) || 7,
+    // Hard limit from sign-in, however active the session is. Then sign in again.
+    maxDays: Number(env.SESSION_MAX_DAYS) || 30,
     // Default to Secure cookies whenever the app is served over https.
     secure: env.COOKIE_SECURE ? flag(env.COOKIE_SECURE) : (env.PUBLIC_URL || '').startsWith('https://')
   },
@@ -66,13 +68,40 @@ const config = {
     type: env.DARAJA_TYPE === 'till' ? 'till' : 'paybill',
     callbackSecret: env.MPESA_CALLBACK_SECRET || '',
     allowedIps: (env.DARAJA_ALLOWED_IPS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    // Looking up a receipt and refunding one are done as an "initiator" (an API operator
+    // user created on the M-Pesa org portal). Give either the security credential the
+    // Daraja portal generates, or the initiator's password plus Safaricom's certificate.
+    initiatorName: env.DARAJA_INITIATOR_NAME || '',
+    securityCredential: env.DARAJA_SECURITY_CREDENTIAL || '',
+    initiatorPassword: env.DARAJA_INITIATOR_PASSWORD || '',
+    certFile: env.DARAJA_CERT_FILE || '',
     baseUrl: env.DARAJA_BASE_URL || ''
   }
+};
+
+/** Settings that would make the app unsafe to run. server.js refuses to start while any are listed. */
+config.problems = () => {
+  const out = [];
+  if (config.publicUrl) {
+    let url = null;
+    try { url = new URL(config.publicUrl); } catch { /* reported below */ }
+    if (!url || !/^https?:$/.test(url.protocol)) out.push(`PUBLIC_URL must be a full http(s) address, like https://hesabu.example.com (got "${config.publicUrl}").`);
+    else if (url.pathname !== '/' || url.search || url.hash) out.push('PUBLIC_URL must be just the address, with no path, like https://hesabu.example.com.');
+  } else if (config.production) {
+    out.push('Set PUBLIC_URL in .env (the https address people reach the app on). Sign-in links and M-Pesa callbacks need it.');
+  }
+  return out;
 };
 
 config.daraja.ready = Boolean(
   config.daraja.consumerKey && config.daraja.consumerSecret && config.daraja.passkey &&
   config.daraja.shortcode && config.daraja.callbackSecret && config.publicUrl
+);
+
+// Lookups and refunds need the basics plus an initiator.
+config.daraja.commandsReady = Boolean(
+  config.daraja.ready && config.daraja.initiatorName &&
+  (config.daraja.securityCredential || (config.daraja.initiatorPassword && config.daraja.certFile))
 );
 
 module.exports = config;
