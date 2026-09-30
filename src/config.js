@@ -28,6 +28,8 @@ const config = {
   session: {
     cookie: 'hesabu_session',
     days: Number(env.SESSION_DAYS) || 7,
+    // Hard limit from sign-in, however active the session is. Then sign in again.
+    maxDays: Number(env.SESSION_MAX_DAYS) || 30,
     // Default to Secure cookies whenever the app is served over https.
     secure: env.COOKIE_SECURE ? flag(env.COOKIE_SECURE) : (env.PUBLIC_URL || '').startsWith('https://')
   },

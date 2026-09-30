@@ -22,6 +22,7 @@ Object.assign(process.env, {
   SMS_TRANSPORT: 'log',
   SETUP_CODE: 'TESTCODE',
   PUBLIC_URL: 'https://hesabu.example.com',
+  TRUST_PROXY: 'loopback', // lets tests pose as different visitors with X-Forwarded-For
   COOKIE_SECURE: 'false',
   MPESA_CALLBACK_SECRET: 'cb-secret-123',
   DARAJA_CONSUMER_KEY: 'key',

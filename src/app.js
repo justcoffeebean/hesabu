@@ -14,11 +14,17 @@ function createApp() {
     app.set('trust proxy', v === 'true' ? true : /^\d+$/.test(v) ? Number(v) : v);
   }
 
+  const https = config.publicUrl.startsWith('https://');
   app.use((_req, res, next) => {
+    // Browsers only honour HSTS over https, and we only claim it when PUBLIC_URL says we're served that way.
+    if (https) res.set('Strict-Transport-Security', 'max-age=31536000');
     res.set({
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'same-origin',
       'X-Frame-Options': 'DENY',
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Resource-Policy': 'same-origin',
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
       'Content-Security-Policy':
         // Inline style attributes are used for widths and colours; scripts must come from our own files.
         "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; " +

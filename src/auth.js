@@ -47,7 +47,9 @@ function parseCookies(header) {
   const out = {};
   String(header || '').split(';').forEach((part) => {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) return;
+    // A malformed %-sequence (from another app on the same host, or a tampered cookie) is skipped, not a 500.
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* ignore */ }
   });
   return out;
 }
@@ -91,7 +93,9 @@ async function loadUser(req, _res, next) {
   if (!session) return next();
 
   const nowMs = Date.now();
-  if (new Date(session.expires_at).getTime() < nowMs) {
+  // Sliding expiry keeps an active session alive, but never past maxDays from sign-in.
+  const tooOld = nowMs - new Date(session.created_at).getTime() > config.session.maxDays * 86400000;
+  if (tooOld || new Date(session.expires_at).getTime() < nowMs) {
     await db.knex('sessions').where({ id: session.id }).del();
     return next();
   }
@@ -126,7 +130,13 @@ const allow = (permission) => (req, _res, next) => {
 function sameOrigin(req, _res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = req.get('origin');
-  if (!origin) return next(); // non-browser clients (curl, tests) don't send Origin
+  if (!origin) {
+    // Browsers that omit Origin still send Sec-Fetch-Site. "same-site" is refused too: SameSite=Lax
+    // lets a sibling subdomain's form carry our cookie. Non-browser clients (curl, tests) send neither.
+    const site = req.get('sec-fetch-site');
+    if (site && site !== 'same-origin' && site !== 'none') fail(403, 'Cross-site request refused.');
+    return next();
+  }
   let host;
   try { host = new URL(origin).host; } catch { fail(403, 'Bad origin.'); }
   const allowed = new Set([req.get('host')]);
@@ -137,25 +147,47 @@ function sameOrigin(req, _res, next) {
 
 /* ---------- brute-force brake ---------- */
 
-const attempts = new Map();
 const WINDOW_MS = 15 * 60 * 1000;
-const MAX_FAILS = 8;
+const MAX_KEYS = 10000;
 
-function loginBlocked(key) {
-  const entry = attempts.get(key);
-  if (!entry) return false;
-  if (Date.now() - entry.first > WINDOW_MS) { attempts.delete(key); return false; }
-  return entry.count >= MAX_FAILS;
+/**
+ * Counts failures per key within a fixed window. Memory is bounded by evicting
+ * the oldest keys one at a time — never by clearing everything, or an attacker
+ * could spray junk keys to wipe the counter on the account they're guessing.
+ */
+function limiter(max) {
+  const hits = new Map();
+  const live = (key) => {
+    const entry = hits.get(key);
+    if (entry && Date.now() - entry.first > WINDOW_MS) { hits.delete(key); return null; }
+    return entry || null;
+  };
+  return {
+    blocked: (key) => (live(key)?.count || 0) >= max,
+    fail(key) {
+      const entry = live(key);
+      if (entry) { entry.count += 1; return; }
+      hits.set(key, { first: Date.now(), count: 1 });
+      while (hits.size > MAX_KEYS) hits.delete(hits.keys().next().value); // Map keeps insertion order
+    },
+    clear: (key) => hits.delete(key)
+  };
 }
 
-function noteLoginFailure(key) {
-  const entry = attempts.get(key);
-  if (!entry || Date.now() - entry.first > WINDOW_MS) attempts.set(key, { first: Date.now(), count: 1 });
-  else entry.count += 1;
-  if (attempts.size > 5000) attempts.clear(); // bounded memory under a spray attack
-}
+// One address guessing one account, and one address guessing across many accounts.
+const perAccount = limiter(8);
+const perIp = limiter(30);
+// First-run setup code and "current password" checks.
+const setupTries = limiter(10);
+const passwordTries = limiter(8);
 
-const clearLoginFailures = (key) => attempts.delete(key);
+const loginBlocked = (email, ip) => perAccount.blocked(`${email}|${ip}`) || perIp.blocked(ip);
+function noteLoginFailure(email, ip) {
+  perAccount.fail(`${email}|${ip}`);
+  perIp.fail(ip);
+}
+// Only the account's own counter resets; the address keeps its tally for the window.
+const clearLoginFailures = (email, ip) => perAccount.clear(`${email}|${ip}`);
 
 /* ---------- first run ---------- */
 
@@ -183,7 +215,7 @@ function publicUser(user) {
 }
 
 module.exports = {
-  hashPassword, verifyPassword, checkPasswordStrength, sha256, token,
+  hashPassword, verifyPassword, checkPasswordStrength, sha256, token, limiter,
   startSession, endSession, loadUser, requireUser, allow, sameOrigin,
-  loginBlocked, noteLoginFailure, clearLoginFailures, setupCode, setupCodeMatches, publicUser, parseCookies
+  loginBlocked, noteLoginFailure, clearLoginFailures, setupTries, passwordTries, setupCode, setupCodeMatches, publicUser, parseCookies
 };

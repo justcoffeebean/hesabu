@@ -98,7 +98,9 @@ Moving existing SQLite data to PostgreSQL isn't automated. For a small business 
 - Run it behind a reverse proxy that terminates HTTPS (Caddy, nginx), set `PUBLIC_URL=https://…` and `TRUST_PROXY=1`.
 - Back up the database: copy `data/hesabu.sqlite` while the app is stopped, or use `pg_dump` for PostgreSQL.
 - Recurring invoices and reminders run inside the app each morning after `JOBS_HOUR`. Keep the process running (systemd, pm2, Docker). If it was off, it catches up on start.
-- The security basics are built in: hashed passwords (scrypt), sessions stored hashed, HttpOnly/SameSite cookies, same-origin checks on every change, sign-in rate limiting, a strict Content-Security-Policy, and an audit log of sign-ins and changes.
+- The security basics are built in: hashed passwords (scrypt), sessions stored hashed, HttpOnly/SameSite cookies, same-origin checks on every change (Origin, or Sec-Fetch-Site when a browser leaves Origin out), a strict Content-Security-Policy, HSTS when `PUBLIC_URL` is https, and an audit log of sign-ins and changes.
+- Guessing is rate limited: sign-in per account and per IP address, the first-run setup code, and the current-password check. Limits reset when the app restarts. Behind a proxy, set `TRUST_PROXY` so they count real visitors rather than the proxy.
+- Sessions slide forward while used (`SESSION_DAYS`, default 7) but always end `SESSION_MAX_DAYS` (default 30) after sign-in.
 
 ## Files
 

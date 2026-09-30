@@ -18,7 +18,12 @@ router.get('/auth/status', async (req, res) => {
 router.post('/auth/setup', async (req, res) => {
   const { name, password, setupCode, companyName } = req.body || {};
   const address = email(req.body?.email);
-  if (!auth.setupCodeMatches(setupCode)) fail(403, 'That setup code is wrong. It is printed in the terminal where the server is running.');
+  // The code is short enough to type, so guessing it must be slow.
+  if (auth.setupTries.blocked(req.ip)) fail(429, 'Too many wrong setup codes. Wait 15 minutes and try again.');
+  if (!auth.setupCodeMatches(setupCode)) {
+    auth.setupTries.fail(req.ip);
+    fail(403, 'That setup code is wrong. It is printed in the terminal where the server is running.');
+  }
   if (!text(name)) fail(400, 'Enter your name.');
   if (!address) fail(400, 'Enter your email address.');
   auth.checkPasswordStrength(password);
@@ -42,8 +47,9 @@ router.post('/auth/setup', async (req, res) => {
 router.post('/auth/login', async (req, res) => {
   const address = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
-  const key = `${address}|${req.ip}`;
-  if (auth.loginBlocked(key)) fail(429, 'Too many attempts. Wait 15 minutes, or ask the owner to send you a reset link.');
+  if (auth.loginBlocked(address, req.ip)) fail(429, 'Too many attempts. Wait 15 minutes, or ask the owner to send you a reset link.');
+  // Real passwords are capped at 200 characters; don't spend scrypt time on megabytes of junk.
+  if (password.length > 200) { auth.noteLoginFailure(address, req.ip); fail(401, 'Email or password is wrong.'); }
 
   const user = address ? await db.knex('users').where({ email: address }).first() : null;
   // Always run a hash comparison so response time doesn't reveal which emails exist.
@@ -52,12 +58,12 @@ router.post('/auth/login', async (req, res) => {
     : (await auth.verifyPassword(password, await dummyHash()), false);
 
   if (!ok || !user.active) {
-    auth.noteLoginFailure(key);
+    auth.noteLoginFailure(address, req.ip);
     // Recorded against the account but not as done by its owner — whoever typed it is unknown.
     if (user) await audit(db.knex, { user: { id: null, name: 'Unknown' }, ip: req.ip }, { action: 'login-failed', entity: 'user', entityId: user.id, summary: `Failed sign-in attempt for ${user.email}` });
     fail(401, !ok ? 'Email or password is wrong.' : 'This account has been switched off. Ask the owner.');
   }
-  auth.clearLoginFailures(key);
+  auth.clearLoginFailures(address, req.ip);
   await db.tx(async (trx) => {
     await auth.startSession(trx, res, user, req);
     await audit(trx, { user, ip: req.ip }, { action: 'login', entity: 'user', entityId: user.id, summary: `${user.name} signed in` });
@@ -83,8 +89,14 @@ router.get('/auth/me', auth.requireUser, async (req, res) => {
 
 router.post('/auth/password', auth.requireUser, async (req, res) => {
   const { currentPassword, newPassword } = req.body || {};
+  // Stops a borrowed or stolen session from guessing its way to the real password.
+  if (auth.passwordTries.blocked(req.user.id)) fail(429, 'Too many wrong passwords. Wait 15 minutes and try again.');
   const user = await db.knex('users').where({ id: req.user.id }).first();
-  if (!(await auth.verifyPassword(currentPassword, user.password_hash))) fail(400, 'Your current password is wrong.');
+  if (!(await auth.verifyPassword(currentPassword, user.password_hash))) {
+    auth.passwordTries.fail(req.user.id);
+    fail(400, 'Your current password is wrong.');
+  }
+  auth.passwordTries.clear(req.user.id);
   auth.checkPasswordStrength(newPassword);
   const hash = await auth.hashPassword(newPassword);
   await db.tx(async (trx) => {

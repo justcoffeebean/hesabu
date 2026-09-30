@@ -28,6 +28,13 @@ test('first-run setup needs the console code and only works once', async () => {
   assert.match(c.cookie, /^hesabu_session=/);
   assert.equal((await c.get('/api/settings')).data.name, 'Test Traders');
 
+  // Guessing the code is rate limited per address (checked before "already has an owner").
+  const guesser = h.client(app.base);
+  const ip = { 'X-Forwarded-For': '198.51.100.9' };
+  let last;
+  for (let i = 0; i < 11; i++) last = await guesser.post('/api/auth/setup', { setupCode: `GUESS${i}` }, ip);
+  assert.equal(last.status, 429);
+
   const again = await h.client(app.base).post('/api/auth/setup', { name: 'Evil', email: 'evil@test.co.ke', password: 'evil-password-1', setupCode: 'TESTCODE' });
   assert.equal(again.status, 409);
 });
@@ -64,6 +71,25 @@ test('repeated wrong passwords are slowed down', async () => {
   let last;
   for (let i = 0; i < 9; i++) last = await c.post('/api/auth/login', { email: 'brute@test.co.ke', password: `guess-${i}-xxxxx` });
   assert.equal(last.status, 429);
+});
+
+test('one address guessing across many accounts is stopped too', async () => {
+  const c = h.client(app.base);
+  const from = { 'X-Forwarded-For': '203.0.113.7' };
+  let last;
+  for (let i = 0; i < 31; i++) last = await c.post('/api/auth/login', { email: `spray${i}@test.co.ke`, password: 'guess-xxxxxxx' }, from);
+  assert.equal(last.status, 429);
+  // Somebody else is unaffected.
+  const other = await c.post('/api/auth/login', { email: 'spray0@test.co.ke', password: 'guess-xxxxxxx' }, { 'X-Forwarded-For': '203.0.113.8' });
+  assert.equal(other.status, 401);
+});
+
+test('flooding the limiter with junk keys does not reset the count for the target', () => {
+  // The old limiter cleared everything past 5000 keys, so a spray of junk emails unlocked the target.
+  const l = require('../src/auth').limiter(3);
+  for (let i = 0; i < 3; i++) l.fail('target');
+  for (let i = 0; i < 9000; i++) l.fail(`junk-${i}`);
+  assert.equal(l.blocked('target'), true);
 });
 
 test('invite link → set password → signed in; link works once', async () => {
@@ -149,9 +175,42 @@ test('cross-site requests that change data are refused', async () => {
   assert.equal(same.status, 201);
 });
 
+test('cross-site requests without an Origin header are refused by Sec-Fetch-Site', async () => {
+  const c = h.client(app.base);
+  await c.post('/api/auth/login', { email: 'owner@test.co.ke', password: 'owner-password-1' });
+  assert.equal((await c.post('/api/tasks', { title: 'x' }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await c.post('/api/tasks', { title: 'x' }, { 'Sec-Fetch-Site': 'same-site' })).status, 403);
+  assert.equal((await c.post('/api/tasks', { title: 'x' }, { 'Sec-Fetch-Site': 'same-origin' })).status, 201);
+});
+
+test('a mangled cookie is ignored rather than breaking the request', async () => {
+  const res = await h.client(app.base).get('/api/auth/status', { Cookie: 'hesabu_session=%E0%A4%A; other=1' });
+  assert.equal(res.status, 200);
+});
+
+test('sessions end after SESSION_MAX_DAYS even if used every day', async () => {
+  const c = h.client(app.base);
+  await c.post('/api/auth/login', { email: 'owner@test.co.ke', password: 'owner-password-1' });
+  const id = require('../src/auth').sha256(c.cookie.split('=')[1]);
+  const old = new Date(Date.now() - 31 * 86400000).toISOString();
+  await h.db.knex('sessions').where({ id }).update({ created_at: old });
+  assert.equal((await c.get('/api/auth/me')).status, 401);
+  assert.equal(await h.db.knex('sessions').where({ id }).first(), undefined);
+});
+
+test('guessing the current password on a signed-in session is slowed down', async () => {
+  const c = h.client(app.base);
+  await c.post('/api/auth/login', { email: 'owner@test.co.ke', password: 'owner-password-1' });
+  let last;
+  for (let i = 0; i < 9; i++) last = await c.post('/api/auth/password', { currentPassword: `nope-${i}-xxxxx`, newPassword: 'whatever-password-9' });
+  assert.equal(last.status, 429);
+});
+
 test('security headers are set', async () => {
   const res = await fetch(app.base + '/');
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(res.headers.get('strict-transport-security'), /max-age=\d+/);
+  assert.equal(res.headers.get('cross-origin-opener-policy'), 'same-origin');
   assert.match(res.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   assert.equal(res.headers.get('x-powered-by'), null);
 });
